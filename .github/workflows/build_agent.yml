@@ -25,9 +25,7 @@ jobs:
 
     - name: Build Agent EXE
       run: |
-        pyinstaller --noconfirm --onefile --windowed \
-            --name "BenchMaster_Agent_Lite" \
-            agent_tool_ui.py
+        pyinstaller --noconfirm --onefile --windowed --name "BenchMaster_Agent_Lite" agent_tool_ui.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
