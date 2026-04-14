@@ -9,6 +9,7 @@ import uuid
 from db.models import get_engine, get_session, BenchmarkJob, Machine, Result
 from pydantic import BaseModel
 from api.dependencies import verify_agent_token
+from api.mqtt_manager import mqtt_manager
 
 router = APIRouter()
 
@@ -44,15 +45,14 @@ def get_db_session():
 @router.post("/", response_model=JobResponse, dependencies=[Depends(verify_agent_token)])
 async def create_job(job_data: JobCreate, db: Session = Depends(get_db_session)):
     """
-    Create a new benchmark job.
-    Requires X-Agent-Token.
+    Create a new benchmark job and notify the machine via MQTT.
     """
     # Check if machine exists
     machine = db.query(Machine).filter(Machine.id == job_data.machine_id).first()
     if not machine:
         raise HTTPException(status_code=404, detail="Machine not found")
 
-    # For now, we just create the job
+    # Create the job record
     new_job = BenchmarkJob(
         machine_id=job_data.machine_id,
         benchmark=job_data.benchmark,
@@ -63,6 +63,14 @@ async def create_job(job_data: JobCreate, db: Session = Depends(get_db_session))
     db.add(new_job)
     db.commit()
     db.refresh(new_job)
+    
+    # --- MQTT Trigger ---
+    # Push the task to the specific machine's topic
+    mqtt_manager.publish_task(new_job.machine_id, {
+        "id": new_job.id,
+        "benchmark": new_job.benchmark,
+        "action": "START"
+    })
     
     return new_job
 
@@ -87,8 +95,7 @@ async def get_job(job_id: int, db: Session = Depends(get_db_session)):
 @router.post("/{job_id}/abort", dependencies=[Depends(verify_agent_token)])
 async def abort_job(job_id: int, db: Session = Depends(get_db_session)):
     """
-    Abort an existing job.
-    Requires X-Agent-Token.
+    Abort an existing job and notify the machine via MQTT.
     """
     job = db.query(BenchmarkJob).filter(BenchmarkJob.id == job_id).first()
     if not job:
@@ -100,5 +107,12 @@ async def abort_job(job_id: int, db: Session = Depends(get_db_session)):
     job.status = "ABORTED"
     job.finished_at = datetime.utcnow()
     db.commit()
+    
+    # --- MQTT Trigger ---
+    # Push the abort command to the specific machine's topic
+    mqtt_manager.publish_task(job.machine_id, {
+        "id": job.id,
+        "action": "ABORT"
+    })
     
     return {"message": f"Job {job_id} has been marked as aborted."}

@@ -13,6 +13,7 @@ import json
 import logging
 from datetime import datetime
 
+import paho.mqtt.client as mqtt
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QTextEdit, QLineEdit, QFormLayout, 
@@ -25,24 +26,23 @@ from PyQt6.QtGui import QFont, QColor, QPalette
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("AgentTool")
 
+# Default MQTT Broker (Publicly accessible for testing)
+DEFAULT_MQTT_BROKER = "broker.emqx.io"
+DEFAULT_MQTT_PORT = 1883
+
 class HardwareScanner:
-    """
-    Handles automatic hardware discovery. 
-    Environment-aware: uses wmic on Windows, and platform/proc on Linux/WSL.
-    """
     @staticmethod
     def get_system_info():
         info = {}
         try:
             info['OS'] = f"{platform.system()} {platform.release()} ({platform.version()})"
             info['Hostname'] = platform.node()
-            
             if platform.system() == "Windows":
                 try:
                     cpu_cmd = "wmic cpu get name"
-                    info['CPU'] = subprocess.check_output(cpu_cmd, shell=True).decode().split('\n')[1].strip()
+                    info['CPU'] = subprocess.check_output(cpu_cmd, shell=True).decode().split('\\n')[1].strip()
                     gpu_cmd = "wmic path win32_VideoController get name"
-                    info['GPU'] = subprocess.check_output(gpu_cmd, shell=True).decode().split('\n')[1].strip()
+                    info['GPU'] = subprocess.check_output(gpu_cmd, shell=True).decode().split('\\n')[1].strip()
                 except:
                     info['CPU'] = "Unknown Windows CPU"
                     info['GPU'] = "Unknown Windows GPU"
@@ -53,7 +53,6 @@ class HardwareScanner:
                 except:
                     info['CPU'] = "Unknown Linux CPU"
                     info['GPU'] = "Unknown Linux GPU"
-
             ram_gb = psutil.virtual_memory().total / (1024**3)
             info['RAM'] = f"{ram_gb:.2f} GB"
         except Exception as e:
@@ -62,106 +61,130 @@ class HardwareScanner:
 
 class AgentCore(QThread):
     """
-    Background worker for heartbeat, polling, and task execution.
+    Hybrid Communication Agent Core.
+    Uses MQTT for real-time control & status, and REST for heavy data.
     """
-    status_updated = pyqtSignal(str, str)  # status, message
+    status_updated = pyqtSignal(str, str)
     log_signal = pyqtSignal(str)
     hardware_scanned = pyqtSignal(dict)
     task_received = pyqtSignal(dict)
 
-    def __init__(self, controller_url, auth_token):
+    def __init__(self, controller_url, auth_token, mqtt_broker=DEFAULT_MQTT_BROKER):
         super().__init__()
         self.controller_url = controller_url.rstrip('/')
         self.auth_token = auth_token
+        self.mqtt_broker = mqtt_broker
         self.is_running = True
         self.is_online = False
         self.machine_id = None
         self.hostname = platform.node()
+        
+        # MQTT Client setup
+        self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        self.mqtt_client.on_connect = self._on_mqtt_connect
+        self.mqtt_client.on_message = self._on_mqtt_message
+        self.mqtt_client.on_disconnect = self._on_mqtt_disconnect
 
     def run(self):
         self.log_signal.emit("Agent Core Started.")
         self.log_signal.emit(f"Target Controller: {self.controller_url}")
+        self.log_signal.emit(f"MQTT Broker: {self.mqtt_broker}")
+        
+        # 1. Hardware Scan
         hw_info = HardwareScanner.get_system_info()
         self.hardware_scanned.emit(hw_info)
-        while self.is_running:
-            if not self.is_online:
-                self._attempt_connection(hw_info)
-            else:
-                self._perform_heartbeat()
-                self._poll_tasks()
-            time.sleep(10)
 
-    def _attempt_connection(self, hw_info):
-        self.log_signal.emit("Attempting to connect to controller...")
+        # 2. Register via REST
+        self._register_machine(hw_info)
+
+        # 3. Start MQTT Connection
+        try:
+            self.mqtt_client.connect(self.mqtt_broker, DEFAULT_MQTT_PORT, 60)
+            self.mqtt_client.loop_start()
+        except Exception as e:
+            self.log_signal.emit(f"MQTT Connection failed: {str(e)}")
+            self.status_updated.emit("Offline", "MQTT Connection failed")
+
+        # 4. Main Loop (Heartbeat & Monitoring)
+        while self.is_running:
+            if self.is_online:
+                self._send_mqtt_heartbeat()
+            else:
+                # If offline, attempt to re-register/re-connect
+                self._attempt_reconnect(hw_info)
+            time.sleep(20) # Heartbeat every 20s
+
+    def _register_machine(self, hw_info):
         headers = {"X-Agent-Token": self.auth_token}
         try:
-            resp = requests.post(
-                f"{self.controller_url}/machines/", 
-                json={
-                    "hostname": self.hostname,
-                    "ip": "127.0.0.1", 
-                    "cpu": hw_info.get('CPU'),
-                    "gpu": hw_info.get('GPU'),
-                    "ram": hw_info.get('RAM'),
-                    "os": hw_info.get('OS')
-                },
-                headers=headers,
-                timeout=5
-            )
+            resp = requests.post(f"{self.controller_url}/machines/", json={
+                "hostname": self.hostname, "ip": "127.0.0.1", "cpu": hw_info.get('CPU'),
+                "gpu": hw_info.get('GPU'), "ram": hw_info.get('RAM'), "os": hw_info.get('OS')
+            }, headers=headers, timeout=5)
             if resp.status_code in [200, 201]:
                 machine_data = resp.json()
                 self.machine_id = machine_data['id']
                 self.is_online = True
-                self.status_updated.emit("Online", f"Connected as Machine ID: {self.machine_id}")
+                self.status_updated.emit("Online", f"Registered! ID: {self.machine_id}")
                 self.log_signal.emit(f"Successfully registered! ID: {self.machine_id}")
             else:
-                self.status_updated.emit("Offline", f"Connection failed: {resp.status_code}")
-                self.log_signal.emit(f"Failed to register: {resp.text}")
-                time.sleep(15)
+                self.log_signal.emit(f"Registration failed: {resp.text}")
         except Exception as e:
-            self.is_online = False
-            self.status_updated.emit("Offline", "Controller unreachable")
-            self.log_signal.emit(f"Connection error: {str(e)}")
-            time.sleep(10)
+            self.log_signal.emit(f"Registration error: {str(e)}")
 
-    def _perform_heartbeat(self):
-        headers = {"X-Agent-Token": self.auth_token}
-        try:
-            resp = requests.get(f"{self.controller_url}/api/health", headers=headers, timeout=5)
-            if resp.status_code == 200:
-                self.status_updated.emit("Online", f"Connected (Last heartbeat: {datetime.now().strftime('%H:%M:%S')})")
-            else:
-                self.is_online = False
-                self.status_updated.emit("Offline", "Lost connection to controller")
-        except:
-            self.is_online = False
-            self.status_updated.emit("Offline", "Connection lost")
+    def _attempt_reconnect(self, hw_info):
+        self.log_signal.emit("Attempting to reconnect...")
+        self._register_machine(hw_info)
 
-    def _poll_tasks(self):
-        headers = {"X-Agent-Token": self.auth_token}
+    def _on_mqtt_connect(self, client, userdata, flags, rc, properties=None):
+        if rc == 0:
+            self.log_signal.emit("MQTT Connected Successfully.")
+            if self.machine_id:
+                topic = f"benchmaster/agent/{self.machine_id}/tasks"
+                self.mqtt_client.subscribe(topic)
+                self.log_signal.emit(f"Subscribed to: {topic}")
+        else:
+            self.log_signal.emit(f"MQTT Connection failed with code {rc}")
+
+    def _on_mqtt_disconnect(self, client, userdata, rc, properties=None):
+        self.is_online = False
+        self.status_updated.emit("Offline", "MQTT Disconnected")
+        self.log_signal.emit("MQTT Disconnected.")
+
+    def _on_mqtt_message(self, client, userdata, msg):
         try:
-            resp = requests.get(f"{self.controller_url}/jobs/", headers=headers, timeout=5)
-            if resp.status_code == 200:
-                jobs = resp.json()
-                for job in jobs:
-                    if job['status'] == 'PENDING' and job['machine_id'] == self.machine_id:
-                        self.log_signal.emit(f"New task received: {job['benchmark']} (ID: {job['id']})")
-                        self.task_received.emit(job)
+            payload = json.loads(msg.payload.decode())
+            self.log_signal.emit(f"MQTT Task Received: {payload.get('benchmark')}")
+            self.task_received.emit(payload)
         except Exception as e:
-            self.log_signal.emit(f"Polling error: {str(e)}")
+            self.log_signal.emit(f"MQTT Message Error: {str(e)}")
+
+    def _send_mqtt_heartbeat(self):
+        if not self.machine_id: return
+        try:
+            status_payload = {
+                "machine_id": self.machine_id,
+                "status": "ONLINE",
+                "timestamp": datetime.now().isoformat()
+            }
+            topic = f"benchmaster/agent/{self.machine_id}/status"
+            self.mqtt_client.publish(topic, json.dumps(status_payload), qos=1)
+        except Exception as e:
+            self.log_signal.emit(f"MQTT Heartbeat Error: {str(e)}")
 
     def stop(self):
         self.is_running = False
+        self.mqtt_client.loop_stop()
+        self.mqtt_client.disconnect()
 
 class AgentMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BenchMaster Agent Lite")
+        self.setWindowTitle("BenchMaster Agent Lite (MQTT Edition)")
         self.resize(800, 600)
         self.setup_ui()
         self.apply_styles()
         self.core = None
-        self.discovery_worker = None
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -233,11 +256,13 @@ class AgentMainWindow(QMainWindow):
         self.url_input = QLineEdit("http://localhost:8000")
         self.token_input = QLineEdit("BM-AGENT-DEFAULT-SECRET-2026")
         self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.mqtt_input = QLineEdit("broker.emqx.io")
         self.btn_start = QPushButton("Start Agent")
         self.btn_start.setObjectName("btn_start")
         self.btn_start.clicked.connect(self.toggle_agent)
         form_layout.addRow("Controller URL:", self.url_input)
         form_layout.addRow("Security Token:", self.token_input)
+        form_layout.addRow("MQTT Broker:", self.mqtt_input)
         form_layout.addRow("", self.btn_start)
         main_settings_layout.addLayout(form_layout)
         main_settings_layout.addStretch()
@@ -283,7 +308,8 @@ class AgentMainWindow(QMainWindow):
     def start_agent(self):
         url = self.url_input.text()
         token = self.token_input.text()
-        self.core = AgentCore(url, token)
+        mqtt_broker = self.mqtt_input.text()
+        self.core = AgentCore(url, token, mqtt_broker)
         self.core.status_updated.connect(self.update_status)
         self.core.log_signal.connect(self.log)
         self.core.hardware_scanned.connect(self.update_hw_display)
