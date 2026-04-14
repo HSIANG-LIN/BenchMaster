@@ -10,6 +10,7 @@ import subprocess
 import psutil
 import requests
 import json
+import logging
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
@@ -17,17 +18,12 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QTextEdit, QLineEdit, QFormLayout, 
     QGroupBox, QProgressBar, QStackedWidget
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QPalette
 
 # --- Configuration & Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("AgentTool")
-
-# Constants for UDP Discovery
-DISCOVERY_PORT = 55555
-DISCOVERY_MSG_REQ = b"BENCHMASTER_DISCOVER_REQ"
-DISCOVERY_MSG_RES_PREFIX = b"BENCHMASTER_DISCOVER_RES:"
 
 class HardwareScanner:
     """
@@ -64,65 +60,6 @@ class HardwareScanner:
             info['Error'] = f"Scan failed: {str(e)}"
         return info
 
-class UDPDiscoveryWorker(QThread):
-    """
-    Scans the local network for the BenchMaster Controller using UDP broadcast.
-    """
-    discovered = pyqtSignal(str)  # Emits the IP address of the controller
-    finished = pyqtSignal()
-
-    def __init__(self, timeout=5):
-        super().__init__()
-        self.timeout = timeout
-        self.is_running = True
-
-    def run(self):
-        logger.info("Starting UDP Discovery...")
-        
-        # 1. Start a listener thread to wait for the response
-        listener_thread = threading.Thread(target=self._listen_for_response)
-        listener_thread.daemon = True
-        listener_thread.start()
-
-        # 2. Broadcast the discovery request
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                sock.settimeout(self.timeout)
-                sock.sendto(DISCOVERY_MSG_REQ, ('<broadcast>', DISCOVERY_PORT))
-                logger.info("Broadcasted discovery request.")
-        except Exception as e:
-            logger.error(f"Broadcast failed: {e}")
-
-        # Wait for discovery signal or timeout
-        start_time = time.time()
-        while self.is_running and (time.time() - start_time < self.timeout):
-            if hasattr(self, '_found_ip'):
-                self.discovered.emit(self._found_ip)
-                break
-            time.sleep(0.5)
-        
-        self.finished.emit()
-        logger.info("Discovery process ended.")
-
-    def _listen_for_response(self):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.bind(('', DISCOVERY_PORT))
-                sock.settimeout(self.timeout + 2)
-                while self.is_running:
-                    data, addr = sock.recvfrom(1024)
-                    if data.startswith(DISCOVERY_MSG_RES_PREFIX):
-                        ip_addr = data.decode().split(':')[1]
-                        self._found_ip = ip_addr
-                        logger.info(f"Controller found at {ip_addr}")
-                        break
-        except Exception as e:
-            logger.error(f"Listener error: {e}")
-
-    def stop(self):
-        self.is_running = False
-
 class AgentCore(QThread):
     """
     Background worker for heartbeat, polling, and task execution.
@@ -144,26 +81,19 @@ class AgentCore(QThread):
     def run(self):
         self.log_signal.emit("Agent Core Started.")
         self.log_signal.emit(f"Target Controller: {self.controller_url}")
-        
-        # 1. Auto-Hardware Scan
-        self.log_signal.emit("Scanning hardware...")
         hw_info = HardwareScanner.get_system_info()
         self.hardware_scanned.emit(hw_info)
-        
-        # 2. Connection/Heartbeat Loop
         while self.is_running:
             if not self.is_online:
                 self._attempt_connection(hw_info)
             else:
                 self._perform_heartbeat()
                 self._poll_tasks()
-            
             time.sleep(10)
 
     def _attempt_connection(self, hw_info):
         self.log_signal.emit("Attempting to connect to controller...")
         headers = {"X-Agent-Token": self.auth_token}
-        
         try:
             resp = requests.post(
                 f"{self.controller_url}/machines/", 
@@ -178,7 +108,6 @@ class AgentCore(QThread):
                 headers=headers,
                 timeout=5
             )
-            
             if resp.status_code in [200, 201]:
                 machine_data = resp.json()
                 self.machine_id = machine_data['id']
@@ -231,7 +160,6 @@ class AgentMainWindow(QMainWindow):
         self.resize(800, 600)
         self.setup_ui()
         self.apply_styles()
-        
         self.core = None
         self.discovery_worker = None
 
@@ -239,40 +167,27 @@ class AgentMainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         self.main_layout = QVBoxLayout(central_widget)
-
-        # --- Header ---
         header_layout = QHBoxLayout()
         self.status_label = QLabel("Status: Standby")
         self.status_label.setObjectName("status_label")
         header_layout.addWidget(self.status_label)
-        
         self.title_label = QLabel("BenchMaster Agent")
         self.title_label.setObjectName("title_label")
         header_layout.addWidget(self.title_label, alignment=Qt.AlignmentFlag.AlignRight)
         self.main_layout.addLayout(header_layout)
-
-        # --- Main Content (Stacked Widget) ---
         self.stack = QStackedWidget()
         self.main_layout.addWidget(self.stack)
-
-        # Page 1: Dashboard
         self.dash_page = QWidget()
         self.setup_dashboard_page()
         self.stack.addWidget(self.dash_page)
-
-        # Page 2: Settings
         self.settings_page = QWidget()
         self.setup_settings_page()
         self.stack.addWidget(self.settings_page)
-
-        # --- Bottom Log Area ---
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setObjectName("log_output")
         self.log_output.setMaximumHeight(150)
         self.main_layout.addWidget(self.log_output)
-
-        # --- Navigation ---
         nav_layout = QHBoxLayout()
         self.btn_dash = QPushButton("Dashboard")
         self.btn_dash.clicked.connect(lambda: self.stack.setCurrentIndex(0))
@@ -284,23 +199,12 @@ class AgentMainWindow(QMainWindow):
 
     def setup_dashboard_page(self):
         layout = QVBoxLayout(self.dash_page)
-        
-        # Hardware Card
         hw_group = QGroupBox("System Information")
         hw_layout = QFormLayout()
-        self.hw_labels = {
-            'OS': QLabel("-"),
-            'Hostname': QLabel("-"),
-            'CPU': QLabel("-"),
-            'GPU': QLabel("-"),
-            'RAM': QLabel("-")
-        }
-        for key, label in self.hw_labels.items():
-            hw_layout.addRow(f"{key}:", label)
+        self.hw_labels = {'OS': QLabel("-"), 'Hostname': QLabel("-"), 'CPU': QLabel("-"), 'GPU': QLabel("-"), 'RAM': QLabel("-")}
+        for key, label in self.hw_labels.items(): hw_layout.addRow(f"{key}:", label)
         hw_group.setLayout(hw_layout)
         layout.addWidget(hw_group)
-
-        # Task Status Card
         task_group = QGroupBox("Current Task")
         task_layout = QVBoxLayout()
         self.task_label = QLabel("No active task")
@@ -313,20 +217,19 @@ class AgentMainWindow(QMainWindow):
         layout.addStretch()
 
     def setup_settings_page(self):
-        layout = QFormLayout(self.settings_page)
-        
+        main_settings_layout = QVBoxLayout(self.settings_page)
+        form_layout = QFormLayout()
         self.url_input = QLineEdit("http://localhost:8000")
         self.token_input = QLineEdit("BM-AGENT-DEFAULT-SECRET-2026")
         self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
-        
         self.btn_start = QPushButton("Start Agent")
         self.btn_start.setObjectName("btn_start")
         self.btn_start.clicked.connect(self.toggle_agent)
-        
-        layout.addRow("Controller URL:", self.url_input)
-        layout.addRow("Security Token:", self.token_input)
-        layout.addRow("", self.btn_start)
-        layout.addStretch()
+        form_layout.addRow("Controller URL:", self.url_input)
+        form_layout.addRow("Security Token:", self.token_input)
+        form_layout.addRow("", self.btn_start)
+        main_settings_layout.addLayout(form_layout)
+        main_settings_layout.addStretch()
 
     def apply_styles(self):
         self.setStyleSheet("""
@@ -351,20 +254,14 @@ class AgentMainWindow(QMainWindow):
 
     def update_status(self, status, message):
         self.status_label.setText(f"Status: {status}")
-        if status == "Online":
-            self.status_label.setStyleSheet("color: #a6e3a1;")
-        elif status == "Offline":
-            self.status_label.setStyleSheet("color: #f38ba8;")
-        elif status == "Searching":
-            self.status_label.setStyleSheet("color: #fab387;")
-        else:
-            self.status_label.setStyleSheet("color: #cdd6f4;")
+        if status == "Online": self.status_label.setStyleSheet("color: #a6e3a1;")
+        elif status == "Offline": self.status_label.setStyleSheet("color: #f38ba8;")
+        else: self.status_label.setStyleSheet("color: #fab387;")
         self.log(message)
 
     def update_hw_display(self, info):
         for key, val in info.items():
-            if key in self.hw_labels:
-                self.hw_labels[key].setText(str(val))
+            if key in self.hw_labels: self.hw_labels[key].setText(str(val))
 
     def toggle_agent(self):
         if self.core and self.core.isRunning():
@@ -375,48 +272,20 @@ class AgentMainWindow(QMainWindow):
     def start_agent(self):
         url = self.url_input.text()
         token = self.token_input.text()
-        
-        # 1. Start Discovery
-        self.update_status("Searching", "Searching for Controller on local network...")
-        self.discovery_worker = UDPDiscoveryWorker()
-        self.discovery_worker.discovered.connect(self.on_controller_found)
-        self.discovery_worker.finished.connect(self.on_discovery_finished)
-        self.discovery_worker.start()
-        
-        self.btn_start.setText("Stop Agent")
-        self.btn_start.setStyleSheet("background-color: #f38ba8; color: #11111b;")
-
-    def on_controller_found(self, ip_addr):
-        self.log(f"Found Controller at {ip_addr}!")
-        new_url = f"http://{ip_addr}:8000"
-        self.url_input.setText(new_url)
-        self.discovery_worker.stop()
-        # Automatically start the core after finding the controller
-        self.start_core_engine(new_url)
-
-    def on_discovery_finished(self):
-        if not hasattr(self, '_is_discovering') or not self._is_discovering:
-            # If discovery ended without finding anything, fallback to manual URL
-            if self.core is None or not self.core.isRunning():
-                self.update_status("Offline", "No controller found via broadcast. Use manual URL.")
-
-    def start_core_engine(self, url):
-        token = self.token_input.text()
         self.core = AgentCore(url, token)
         self.core.status_updated.connect(self.update_status)
         self.core.log_signal.connect(self.log)
         self.core.hardware_scanned.connect(self.update_hw_display)
         self.core.task_received.connect(self.on_task_received)
         self.core.start()
+        self.btn_start.setText("Stop Agent")
+        self.btn_start.setStyleSheet("background-color: #f38ba8; color: #11111b;")
 
     def stop_agent(self):
-        if self.core:
-            self.core.stop()
-        if self.discovery_worker:
-            self.discovery_worker.stop()
+        if self.core: self.core.stop()
         self.btn_start.setText("Start Agent")
         self.btn_start.setStyleSheet("")
-        self.update_status("Offline", "Agent stopped.")
+        self.update_status("Offline", "Agent stopped by user.")
 
     def on_task_received(self, job):
         self.task_label.setText(f"Running: {job['benchmark']} (ID: {job['id']})")
