@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BenchMaster Pro Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+        .card-hover:hover { transform: translateY(-4px); transition: all 0.3s ease; }
+        .glass-effect { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(10px); }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-900 font-sans" x-data="dashboardApp()">
+
+    <!-- Navigation -->
+    <nav class="bg-slate-900 text-white shadow-xl sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <div class="flex items-center gap-8">
+                    <span class="text-2xl font-black tracking-tighter text-blue-400 cursor-pointer" @click="view = 'overview'">BENCH<span class="text-white">MASTER</span></span>
+                    <div class="hidden md:flex space-x-2">
+                        <button @click="view = 'overview'" :class="view === 'overview' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'" class="px-4 py-2 rounded-lg text-sm font-bold transition">Fleet</button>
+                        <button @click="view = 'trends'" :class="view === 'trends' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'" class="px-4 py-2 rounded-lg text-sm font-bold transition">Trends</button>
+                        <button @click="view = 'thresholds'" :class="view === 'thresholds' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'" class="px-4 py-2 rounded-lg text-sm font-bold transition">Thresholds</button>
+                    </div>
+                </div>
+                <div class="flex items-center gap-4">
+                    <div class="h-2 w-2 bg-green-500 rounded-full animate-pulse"></div>
+                    <span class="text-xs font-mono text-slate-400 uppercase tracking-widest">System Online</span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+        
+        <!-- VIEW: FLEET OVERVIEW -->
+        <div x-show="view === 'overview'" x-cloak class="space-y-8">
+            <div class="flex items-end justify-between">
+                <div>
+                    <h1 class="text-4xl font-black text-slate-900 tracking-tight">Fleet Overview</h1>
+                    <p class="text-slate-500 mt-2 text-lg">Real-time status of all managed nodes.</p>
+                </div>
+                <button @click="fetchMachines()" class="bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 px-5 py-2.5 rounded-xl text-sm font-bold shadow-sm transition flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                    Sync Fleet
+                </button>
+            </div>
+
+            <div x-show="loading" class="flex justify-center items-center py-32">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+            </div>
+
+            <div x-show="!loading && machines.length > 0" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                <template x-for="machine in machines" :key="machine.id">
+                    <div @click="selectMachine(machine.id)" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 cursor-pointer card-hover group">
+                        <div class="flex items-center justify-between mb-6">
+                            <div :class="machine.last_heartbeat ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]' : 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]'" class="h-3 w-3 rounded-full transition-all group-hover:scale-125"></div>
+                            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widant" x-text="machine.ip"></span>
+                        </div>
+                        <h3 class="text-xl font-black text-slate-800 mb-1 group-hover:text-blue-600 transition" x-text="machine.hostname"></h3>
+                        <p class="text-sm text-slate-500 mb-6" x-text="machine.os"></p>
+                        <div class="grid grid-cols-2 gap-4 text-xs border-t border-slate-50 pt-4">
+                            <div><p class="text-slate-400 font-medium uppercase">CPU</p><p class="text-slate-700 font-bold truncate" x-text="machine.cpu || 'N/A'"></p></div>
+                            <div><p class="text-slate-400 font-medium uppercase">RAM</p><p class="text-slate-700 font-bold" x-text="machine.ram + ' GB'"></p></div>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+
+        <!-- VIEW: MACHINE DETAIL -->
+        <div x-show="view === 'detail'" x-cloak class="space-y-8">
+            <button @click="view = 'overview'" class="flex items-center text-slate-500 hover:text-blue-600 font-bold transition">
+                <svg class="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                Back to Fleet
+            </button>
+
+            <div x-show="loading" class="flex justify-center items-center py-20">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+            </div>
+
+            <div x-show="!loading && selectedMachine" class="space-y-8">
+                <div class="bg-white rounded-3xl shadow-xl border border-slate-200 overflow-hidden">
+                    <div class="bg-slate-900 p-8 text-white">
+                        <div class="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                            <div>
+                                <div class="flex items-center gap-3 mb-2">
+                                    <h1 class="text-4xl font-black tracking-tight" x-text="selectedMachine.hostname"></h1>
+                                    <span class="px-2 py-1 bg-blue-500/20 text-blue-400 text-xs font-bold rounded uppercase tracking-widest" x-text="selectedMachine.os"></span>
+                                </div>
+                                <p class="text-slate-400 font-mono text-sm" x-text="selectedMachine.ip"></p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 md:grid-cols-4 divide-x divide-slate-100">
+                        <div class="p-6"><p class="text-xs font-bold text-slate-400 uppercase mb-1">CPU</p><p class="text-lg font-black text-slate-800" x-text="selectedMachine.cpu"></p></div>
+                        <div class="p-6"><p class="text-xs font-bold text-slate-400 uppercase mb-1">GPU</p><p class="text-lg font-black text-slate-800" x-text="selectedMachine.gpu || 'N/A'"></p></div>
+                        <div class="p-6"><p class="text-xs font-bold text-slate-400 uppercase mb-1">Memory</p><p class="text-lg font-black text-slate-800" x-text="selectedMachine.ram + ' GB'"></p></div>
+                        <div class="p-6"><p class="text-xs font-bold text-slate-400 uppercase mb-1">Status</p><p class="text-lg font-black text-green-500">Online</p></div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-3xl shadow-xl border border-slate-200 p-8">
+                    <div class="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
+                        <h2 class="text-2xl font-black text-slate-800">Performance History</h2>
+                        <div x-show="availableMetrics.length > 0" class="flex items-center bg-slate-100 p-1 rounded-xl">
+                            <template x-for="metric in availableMetrics" :key="metric">
+                                <button @click="selectedMetric = metric; updateChart()" 
+                                    :class="selectedMetric === metric ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                                    class="px-4 py-2 rounded-lg text-xs font-bold transition" 
+                                    x-text="metric.toUpperCase()">
+                                </button>
+                            </template>
+                        </div>
+                    </div>
+                    <div class="h-96 w-full"><canvas id="trendChart"></canvas></div>
+                </div>
+
+                <div class="bg-white rounded-3xl shadow-xl border border-slate-200 overflow-hidden">
+                    <div class="px-8 py-6 border-b border-slate-100">
+                        <h2 class="text-xl font-black text-slate-800">Benchmark Logs</h2>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-slate-200">
+                            <thead class="bg-slate-50/50">
+                                <tr>
+                                    <th class="px-8 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-widest">Benchmark</th>
+                                    <th class="px-8 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-widest">Timestamp</th>
+                                    <th class="px-8 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-widest">Score</th>
+                                    <th class="px-8 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-widest">Result</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                <template x-for="res in results" :key="res.id">
+                                    <tr class="hover:bg-slate-50/50 transition">
+                                        <td class="px-8 py-5 whitespace-nowrap text-sm font-bold text-slate-700" x-text="res.benchmark"></td>
+                                        <td class="px-8 py-5 whitespace-nowrap text-sm text-slate-500" x-text="formatDate(res.timestamp)"></td>
+                                        <td class="px-8 py-5 whitespace-nowrap text-sm font-black text-blue-600" x-text="res.scores[selectedMetric] || 'N/A'"></td>
+                                        <td class="px-8 py-5 whitespace-nowrap">
+                                            <span :class="res.pass_fail === 'PASS' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" class="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter" x-text="res.pass_fail"></span>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- VIEW: THRESHOLDS -->
+        <div x-show="view === 'thresholds'" x-cloak class="space-y-8">
+            <div class="flex items-end justify-between">
+                <div>
+                    <h1 class="text-4xl font-black text-slate-900 tracking-tight">Threshold Management</h1>
+                    <p class="text-slate-500 mt-2 text-lg">Configure performance pass/fail limits.</p>
+                </div>
+                <button @click="showModal = true; editMode = false; resetForm()" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl text-sm font-bold shadow-lg transition flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                    Add New
+                </button>
+            </div>
+
+            <div x-show="loading" class="flex justify-center items-center py-32">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+            </div>
+
+            <div x-show="!loading" class="bg-white rounded-3xl shadow-xl border border-slate-200 overflow-hidden">
+                <table class="min-w-full divide-y divide-slate-200">
+                    <thead class="bg-slate-50">
+                        <tr>
+                            <th class="px-8 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-widest">Benchmark</th>
+                            <th class="px-8 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-widest">Metric Key</th>
+                            <th class="px-8 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-widest">Min Limit</th>
+                            <th class="px-8 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-widest">Max Limit</th>
+                            <th class="px-8 py-4 text-left text-xs font-bold text-slate-400 uppercase tracking-widest">Ver</th>
+                            <th class="px-8 py-4 text-right text-xs font-bold text-slate-400 uppercase tracking-widest">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        <template x-for="t in thresholds" :key="t.id">
+                            <tr class="hover:bg-slate-50 transition">
+                                <td class="px-8 py-5 whitespace-nowrap text-sm font-black text-slate-800" x-text="t.benchmark"></td>
+                                <td class="px-8 py-5 whitespace-nowrap text-sm font-mono text-blue-600" x-text="t.metric_key"></td>
+                                <td class="px-8 py-5 whitespace-nowrap text-sm text-slate-700" x-text="t.min_val !== null ? t.min_val : '-'"></td>
+                                <td class="px-8 py-5 whitespace-nowrap text-sm text-slate-700" x-text="t.max_val !== null ? t.max_val : '-'"></td>
+                                <td class="px-8 py-5 whitespace-nowrap text-sm text-slate-400" x-text="t.version"></td>
+                                <td class="px-8 py-5 whitespace-nowrap text-right text-sm font-bold">
+                                    <button @click="editThreshold(t)" class="text-blue-600 hover:text-blue-900 mr-4 transition">Edit</button>
+                                    <button @click="deleteThreshold(t.id)" class="text-red-600 hover:text-red-900 transition">Delete</button>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- MODAL: CREATE/EDIT THRESHOLD -->
+            <div x-show="showModal" class="fixed inset-0 z-50 overflow-y-auto" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+                <div @click="showModal = false" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity"></div>
+                <div class="flex items-center justify-center min-h-screen p-4">
+                    <div class="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden transform transition-all">
+                        <form @submit.prevent="saveThreshold">
+                            <div class="px-8 pt-8 pb-6">
+                                <h3 class="text-2xl font-black text-slate-900 mb-6" x-text="editMode ? 'Edit Threshold' : 'New Threshold'"></h3>
+                                <div class="space-y-5">
+                                    <div>
+                                        <label class="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Benchmark Name</label>
+                                        <input type="text" x-model="form.benchmark" required class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Metric Key (e.g. mem_read)</label>
+                                        <input type="text" x-model="form.metric_key" required class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition">
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Min Limit</label>
+                                            <input type="number" step="any" x-model="form.min_val" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition">
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Max Limit</label>
+                                            <input type="number" step="any" x-model="form.max_val" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition">
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Version</label>
+                                        <input type="text" x-model="form.version" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="bg-slate-50 px-8 py-6 flex gap-3 justify-end">
+                                <button @click="showModal = false" type="button" class="px-6 py-2.5 text-sm font-bold text-slate-500 hover:text-slate-700 transition">Cancel</button>
+                                <button type="submit" class="px-8 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold shadow-lg shadow-blue-900/20 transition">Save Changes</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        function dashboardApp() {
+            return {
+                view: 'overview',
+                loading: false,
+                machines: [],
+                selectedMachine: null,
+                results: [],
+                selectedMetric: '',
+                availableMetrics: [],
+                chartInstance: null,
+                
+                // Threshold state
+                showModal: false,
+                editMode: false,
+                editId: null,
+                thresholds: [],
+                form: {
+                    benchmark: '',
+                    metric_key: '',
+                    min_val: null,
+                    max_val: null,
+                    version: '1.0'
+                },
+
+                async init() {
+                    await this.fetchMachines();
+                    await this.fetchThresholds();
+                },
+
+                async fetchMachines() {
+                    this.loading = true;
+                    try {
+                        const res = await fetch('/machines/');
+                        this.machines = await res.json();
+                    } catch (e) { console.error(e); } finally { this.loading = false; }
+                },
+
+                async fetchThresholds() {
+                    this.loading = true;
+                    try {
+                        const res = await fetch('/thresholds/');
+                        this.thresholds = await res.json();
+                    } catch (e) { console.error(e); } finally { this.loading = false; }
+                },
+
+                async selectMachine(id) {
+                    this.loading = true;
+                    this.view = 'detail';
+                    try {
+                        const mRes = await fetch(`/machines/${id}`);
+                        this.selectedMachine = await mRes.json();
+                        const rRes = await fetch(`/results/?machine_id=${id}`);
+                        this.results = await rRes.json();
+
+                        const metricsSet = new Set();
+                        this.results.forEach(res => {
+                            Object.keys(res.scores).forEach(k => metricsSet.add(k));
+                        });
+                        this.availableMetrics = Array.from(metricsSet);
+                        if (this.availableMetrics.length > 0) this.selectedMetric = this.availableMetrics[0];
+
+                        this.$nextTick(() => this.renderChart());
+                    } catch (e) { console.error(e); } finally { this.loading = false; }
+                },
+
+                // Threshold CRUD
+                resetForm() {
+                    this.form = { benchmark: '', metric_key: '', min_val: null, max_val: null, version: '1.0' };
+                },
+
+                async editThreshold(t) {
+                    this.editMode = true;
+                    this.editId = t.id;
+                    this.form = { ...t };
+                    this.showModal = true;
+                },
+
+                async saveThreshold() {
+                    const method = this.editMode ? 'PUT' : 'POST';
+                    const url = this.editMode ? `/thresholds/${this.editId}` : '/thresholds/';
+                    try {
+                        const res = await fetch(url, {
+                            method: method,
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(this.form)
+                        });
+                        if (res.ok) {
+                            await this.fetchThresholds();
+                            this.showModal = false;
+                        } else {
+                            alert('Failed to save threshold');
+                        }
+                    } catch (e) { console.error(e); }
+                },
+
+                async deleteThreshold(id) {
+                    if (!confirm('Are you sure you want to delete this threshold?')) return;
+                    try {
+                        await fetch(`/thresholds/${id}`, { method: 'DELETE' });
+                        await this.fetchThresholds();
+                    } catch (e) { console.error(e); }
+                },
+
+                // Helpers
+                formatDate(d) { return d ? new Date(d).toLocaleString() : '-'; },
+
+                renderChart() {
+                    const ctx = document.getElementById('trendChart').getContext('2d');
+                    if (this.chartInstance) this.chartInstance.destroy();
+                    const sorted = [...this.results].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+                    const labels = sorted.map(r => new Date(r.timestamp).toLocaleDateString());
+                    const dataPoints = sorted.map(r => r.scores[this.selectedMetric] || 0);
+                    this.chartInstance = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: labels,
+                            datasets: [{
+                                label: this.selectedMetric,
+                                data: dataPoints,
+                                borderColor: '#2563eb',
+                                backgroundColor: 'rgba(37, 99, 235, 0.1)',
+                                borderWidth: 3,
+                                fill: true,
+                                tension: 0.4,
+                                pointRadius: 4,
+                                pointBackgroundColor: '#2563eb'
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: { legend: { display: false } },
+                            scales: { y: { beginAtZero: false, grid: { color: '#f1f5f9' } }, x: { grid: { display: false } } }
+                        }
+                    });
+                },
+
+                updateChart() {
+                    if (this.chartInstance) this.renderChart();
+                }
+            }
+        }
+    </script>
+</body>
+</html>
