@@ -167,6 +167,8 @@ class AgentMainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         self.main_layout = QVBoxLayout(central_widget)
+        self.main_layout.setContentsMargins(20, 20, 20, 20)
+        self.main_layout.setSpacing(15)
         header_layout = QHBoxLayout()
         self.status_label = QLabel("Status: Standby")
         self.status_label.setObjectName("status_label")
@@ -199,14 +201,20 @@ class AgentMainWindow(QMainWindow):
 
     def setup_dashboard_page(self):
         layout = QVBoxLayout(self.dash_page)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(15)
         hw_group = QGroupBox("System Information")
         hw_layout = QFormLayout()
+        hw_layout.setContentsMargins(15, 15, 15, 15)
+        hw_layout.setVerticalSpacing(10)
         self.hw_labels = {'OS': QLabel("-"), 'Hostname': QLabel("-"), 'CPU': QLabel("-"), 'GPU': QLabel("-"), 'RAM': QLabel("-")}
         for key, label in self.hw_labels.items(): hw_layout.addRow(f"{key}:", label)
         hw_group.setLayout(hw_layout)
         layout.addWidget(hw_group)
         task_group = QGroupBox("Current Task")
         task_layout = QVBoxLayout()
+        task_layout.setContentsMargins(15, 15, 15, 15)
+        task_layout.setSpacing(15)
         self.task_label = QLabel("No active task")
         self.task_label.setObjectName("task_label")
         self.task_progress = QProgressBar()
@@ -218,7 +226,10 @@ class AgentMainWindow(QMainWindow):
 
     def setup_settings_page(self):
         main_settings_layout = QVBoxLayout(self.settings_page)
+        main_settings_layout.setContentsMargins(20, 20, 20, 20)
         form_layout = QFormLayout()
+        form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setVerticalSpacing(15)
         self.url_input = QLineEdit("http://localhost:8000")
         self.token_input = QLineEdit("BM-AGENT-DEFAULT-SECRET-2026")
         self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
