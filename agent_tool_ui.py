@@ -1,4 +1,4 @@
-# ~/benchmaster/agent_tool_ui.py
+# ~/agent_tool_ui.py
 
 import sys
 import os
@@ -12,6 +12,7 @@ import requests
 import json
 import logging
 from datetime import datetime
+from typing import Dict, List, Any, Optional
 
 import paho.mqtt.client as mqtt
 from PyQt6.QtWidgets import (
@@ -23,12 +24,21 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QPalette
 
 # --- Configuration & Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger("AgentTool")
 
 # Default MQTT Broker (Publicly accessible for testing)
 DEFAULT_MQTT_BROKER = "broker.emqx.io"
 DEFAULT_MQTT_PORT = 1883
+
+# Mock Command Mapping for Testing (since we are in Linux/WSL)
+# In a real Windows environment, these would be paths to .exe files.
+BENCHMARK_COMMANDS = {
+    "cinebench": 'echo "Cinebench R24 Results\\nSingle Core Score: 1250.4\\nMulti Core Score: 15800.2\\nMP Ratio: 12.6"',
+    "aida64": 'echo "AIDA64 Memory Benchmark\\nMemory Read: 65000.5 MB/s\\nMemory Write: 55000.2 MB/s\\nMemory Copy: 60000.0 MB/s\\nMemory Latency: 55.5 ns"',
+    "crystaldiskmark": 'echo "Sequential Read: 560.2 MB/s\\nSequential Write: 450.1 MB/s\\nRandom 4K Read: 45.2 MB/s\\nRandom 4K Write: 38.5 MB/s"',
+    "threedmark": 'echo "3DMark Time Spy\\nGraphics score: 12500.5\\nCPU score: 8000.0\\nTotal score: 11000.0"'
+}
 
 class HardwareScanner:
     @staticmethod
@@ -59,6 +69,113 @@ class HardwareScanner:
             info['Error'] = f"Scan failed: {str(e)}"
         return info
 
+class BenchmarkWorker(QThread):
+    """
+    Handles the heavy lifting: running the benchmark command, 
+    parsing the output, and reporting to the server.
+    """
+    finished = pyqtSignal(str, str) # status, message
+    progress = pyqtSignal(int)
+    log = pyqtSignal(str)
+
+    def __init__(self, controller_url, auth_token, machine_id, job_id, benchmark, command):
+        super().__init__()
+        self.controller_url = controller_url.rstrip('/')
+        self.auth_token = auth_token
+        self.machine_id = machine_id
+        self.job_id = job_id
+        self.benchmark = benchmark
+        self.command = command
+
+    def run(self):
+        try:
+            self.log.emit(f"🚀 Starting benchmark: {self.benchmark}")
+            self.progress.emit(10)
+
+            # 1. Execute the benchmark command
+            # In a real environment, this runs the actual exe.
+            process = subprocess.Popen(
+                self.command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            stdout, stderr = process.communicate()
+            self.progress.emit(50)
+
+            if process.returncode != 0:
+                self.log.emit(f"❌ Command failed with code {process.returncode}")
+                self.log.emit(f"Error: {stderr}")
+                self.finished.emit("FAILED", stderr)
+                return
+
+            self.log.emit("✅ Benchmark command finished. Parsing output...")
+            self.progress.emit(70)
+
+            # 2. Find and use the appropriate parser
+            parser = self._get_parser(self.benchmark)
+            if not parser:
+                self.log.emit(f"⚠️ No parser found for benchmark: {self.benchmark}")
+                self.finished.emit("FAILED", f"No parser for {self.benchmark}")
+                return
+
+            scores = parser.parse(stdout)
+            if not scores:
+                self.log.emit("⚠️ Parsing failed (no valid metrics found in output)")
+                self.finished.emit("FAILED", "Parsing failed")
+                return
+
+            self.log.emit(f"📊 Parsed metrics: {scores}")
+            self.progress.emit(90)
+
+            # 3. Report results to the server via REST
+            self.log.emit(f"📤 Reporting results to {self.controller_url}/results/...")
+            payload = {
+                "job_id": self.job_id,
+                "machine_id": self.machine_id,
+                "benchmark": self.benchmark,
+                "scores_json": scores,
+                "system_snapshot_json": {}, # In a real agent, this would be populated
+                "tags": "automated_test",
+                "pass_fail": "PASS" # Simplified for this implementation
+            }
+            headers = {"X-Agent-Token": self.auth_token}
+            
+            resp = requests.post(f"{self.controller_url}/results/", json=payload, headers=headers, timeout=10)
+            
+            if resp.status_code in [200, 201]:
+                self.log.emit("🎉 Result reported successfully!")
+                self.finished.emit("COMPLETED", "Benchmark successful")
+            else:
+                self.log.emit(f"❌ Failed to report: {resp.status_code} - {resp.text}")
+                self.finished.emit("FAILED", f"Reporting error: {resp.text}")
+
+        except Exception as e:
+            self.log.emit(f"💥 Worker Error: {str(e)}")
+            self.finished.emit("FAILED", str(e))
+
+    def _get_parser(self, benchmark_name: str):
+        # Import parsers dynamically to avoid dependency issues during init
+        try:
+            from parsers.cinebench import CinebenchParser
+            from parsers.aida64 import AIDA64Parser
+            from parsers.crystaldiskmark import CrystalDiskMarkParser
+            from parsers.threedmark import ThreeDMarkParser
+        except ImportError as e:
+            self.log.emit(f"Error importing parsers: {str(e)}")
+            return None
+
+        mapping = {
+            "cinebench": CinebenchParser,
+            "aida64": AIDA64Parser,
+            "crystaldiskmark": CrystalDiskMarkParser,
+            "threedmark": ThreeDMarkParser
+        }
+        
+        cls = mapping.get(benchmark_name.lower())
+        return cls() if cls else None
+
 class AgentCore(QThread):
     """
     Hybrid Communication Agent Core.
@@ -79,7 +196,6 @@ class AgentCore(QThread):
         self.machine_id = None
         self.hostname = platform.node()
         
-        # MQTT Client setup
         self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.mqtt_client.on_connect = self._on_mqtt_connect
         self.mqtt_client.on_message = self._on_mqtt_message
@@ -110,9 +226,8 @@ class AgentCore(QThread):
             if self.is_online:
                 self._send_mqtt_heartbeat()
             else:
-                # If offline, attempt to re-register/re-connect
                 self._attempt_reconnect(hw_info)
-            time.sleep(20) # Heartbeat every 20s
+            time.sleep(20) 
 
     def _register_machine(self, hw_info):
         headers = {"X-Agent-Token": self.auth_token}
@@ -180,11 +295,12 @@ class AgentCore(QThread):
 class AgentMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BenchMaster Agent Lite (MQTT Edition)")
-        self.resize(800, 600)
+        self.setWindowTitle("BenchMaster Agent Pro")
+        self.resize(900, 700)
         self.setup_ui()
         self.apply_styles()
         self.core = None
+        self.worker = None
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -211,7 +327,7 @@ class AgentMainWindow(QMainWindow):
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setObjectName("log_output")
-        self.log_output.setMaximumHeight(150)
+        self.log_output.setMaximumHeight(180)
         self.main_layout.addWidget(self.log_output)
         nav_layout = QHBoxLayout()
         self.btn_dash = QPushButton("Dashboard")
@@ -234,7 +350,7 @@ class AgentMainWindow(QMainWindow):
         for key, label in self.hw_labels.items(): hw_layout.addRow(f"{key}:", label)
         hw_group.setLayout(hw_layout)
         layout.addWidget(hw_group)
-        task_group = QGroupBox("Current Task")
+        task_group = QGroupBox("Current Task Execution")
         task_layout = QVBoxLayout()
         task_layout.setContentsMargins(15, 15, 15, 15)
         task_layout.setSpacing(15)
@@ -325,9 +441,36 @@ class AgentMainWindow(QMainWindow):
         self.update_status("Offline", "Agent stopped by user.")
 
     def on_task_received(self, job):
+        """Handles the task received via MQTT and starts the worker thread."""
+        if self.worker and self.worker.isRunning():
+            self.log("⚠️ A task is already running. Cancelling previous worker...")
+            self.worker.terminate()
+            self.worker.wait()
+
         self.task_label.setText(f"Running: {job['benchmark']} (ID: {job['id']})")
-        self.task_progress.setRange(0, 100)
-        self.task_progress.setValue(20)
+        self.task_progress.setValue(0)
+
+        # Determine command to run (using mock commands for testing)
+        command = BENCHMARK_COMMANDS.get(job['benchmark'].lower(), "echo 'Unknown benchmark'")
+        
+        # Start the heavy-lifting worker thread
+        self.worker = BenchmarkWorker(
+            controller_url=self.core.controller_url,
+            auth_token=self.core.auth_token,
+            machine_id=self.core.machine_id,
+            job_id=job['id'],
+            benchmark=job['benchmark'],
+            command=command
+        )
+        self.worker.log.connect(self.log)
+        self.worker.progress.connect(self.task_progress.setValue)
+        self.worker.finished.connect(self.on_task_finished)
+        self.worker.start()
+
+    def on_task_finished(self, status, message):
+        self.task_label.setText(f"Last Task Status: {status}")
+        self.task_progress.setValue(100 if status == "COMPLETED" else 0)
+        self.log(f"🏁 Task finished with status: {status}. {message}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

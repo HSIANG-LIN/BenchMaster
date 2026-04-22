@@ -1,7 +1,7 @@
 # ~/benchmaster/db/models.py
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from sqlalchemy import (
     Column, Integer, String, Float, ForeignKey, 
@@ -11,6 +11,9 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker, Session
 
 Base = declarative_base()
+
+def get_utc_now():
+    return datetime.now(timezone.utc)
 
 class Machine(Base):
     """
@@ -25,8 +28,18 @@ class Machine(Base):
     gpu = Column(String(255))
     ram = Column(String(50))
     os = Column(String(255))
-    first_seen = Column(DateTime, default=datetime.utcnow)
-    last_heartbeat = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Real-time metrics
+    cpu_usage_percent = Column(Float, default=0.0)
+    memory_used_mb = Column(Float, default=0.0)
+    memory_total_mb = Column(Float, default=0.0)
+    disk_usage_percent = Column(Float, default=0.0)
+    network_rx_mbps = Column(Float, default=0.0)
+    network_tx_mbps = Column(Float, default=0.0)
+    last_metrics_update = Column(DateTime, default=get_utc_now, onupdate=get_utc_now)
+    # Legacy fields
+    first_seen = Column(DateTime, default=get_utc_now)
+    last_heartbeat = Column(DateTime, default=get_utc_now, onupdate=get_utc_now)
+    status = Column(String(50), default='ONLINE')
     schedule_cron = Column(String(100), nullable=True) # Cron expression for automated tests
 
     # Relationships
@@ -61,7 +74,7 @@ class Result(Base):
     job_id = Column(Integer, ForeignKey('benchmark_jobs.id'), nullable=False)
     machine_id = Column(Integer, ForeignKey('machines.id'), nullable=False)
     benchmark = Column(String(100), nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=get_utc_now)
     scores_json = Column(JSON, nullable=False)          # e.g., {"single_core": 1200.5}
     system_snapshot_json = Column(JSON, nullable=False) # e.g., {"cpu": "...", "gpu": "..."}
     tags = Column(String(500))                          # Stored as comma-separated string
@@ -97,12 +110,12 @@ class Alert(Base):
     result_id = Column(Integer, ForeignKey('results.id'), nullable=True)
     alert_type = Column(String(100), nullable=False)  # e.g., "OFFLINE", "LOW_SCORE"
     message = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_utc_now)
     acknowledged = Column(Boolean, default=False)
 
     # Relationships
     machine = relationship("Machine", back_populates="alerts")
-    result = relationship("Result", back_populates="alert")
+    result = relationship("Alert", back_populates="result", uselist=False)
 
 # --- Database Utilities ---
 

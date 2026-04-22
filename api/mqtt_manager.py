@@ -22,6 +22,7 @@ class MqttManager:
         if rc == 0:
             logger.info("Successfully connected to MQTT Broker.")
             self.client.subscribe("benchmaster/agent/+/status")
+            self.client.subscribe("benchmaster/agent/+/metrics")
         else:
             logger.error(f"Failed to connect to MQTT Broker (code {rc})")
 
@@ -34,13 +35,15 @@ class MqttManager:
             payload = json.loads(msg.payload.decode())
             logger.info(f"MQTT Message received on {topic}: {payload}")
 
-            if "status" in topic:
-                parts = topic.split("/")
-                if len(parts) == 4:
-                    machine_id = parts[2]
-                    self._update_machine_status(int(machine_id), payload)
+            parts = topic.split("/")
+            if len(parts) == 4:
+                machine_id = int(parts[2])
+                if "status" in topic:
+                    self._update_machine_status(machine_id, payload)
+                elif "metrics" in topic:
+                    self._update_machine_metrics(machine_id, payload)
         except Exception as e:
-            logger.error(f"Error processing MQTT message: {str(e)}")
+            logger.error(f"Error processing MQTT message: {e}")
 
     def _update_machine_status(self, machine_id, payload):
         session = get_session(self.engine)
@@ -53,7 +56,30 @@ class MqttManager:
             else:
                 logger.warning(f"Received status for unknown Machine ID: {machine_id}")
         except Exception as e:
-            logger.error(f"Failed to update machine status in DB: {str(e)}")
+            logger.error(f"Failed to update machine status in DB: {e}")
+        finally:
+            session.close()
+
+    def _update_machine_metrics(self, machine_id, payload):
+        session = get_session(self.engine)
+        try:
+            machine = session.query(Machine).filter(Machine.id == machine_id).first()
+            if machine:
+                # Update real-time metrics
+                machine.cpu_usage_percent = payload.get("cpu_usage_percent", machine.cpu_usage_percent)
+                machine.memory_used_mb = payload.get("memory_used_mb", machine.memory_used_mb)
+                machine.memory_total_mb = payload.get("memory_total_mb", machine.memory_total_mb)
+                machine.disk_usage_percent = payload.get("disk_usage_percent", machine.disk_usage_percent)
+                machine.network_rx_mbps = payload.get("network_rx_mbps", machine.network_rx_mbps)
+                machine.network_tx_mbps = payload.get("network_tx_mbps", machine.network_tx_mbps)
+                # last_metrics_update is handled by onupdate=get_utc_now in models.py
+                
+                session.commit()
+                logger.info(f"Updated Machine {machine_id} metrics via MQTT.")
+            else:
+                logger.warning(f"Received metrics for unknown Machine ID: {machine_id}")
+        except Exception as e:
+            logger.error(f"Failed to update machine metrics in DB: {e}")
         finally:
             session.close()
 
@@ -70,7 +96,7 @@ class MqttManager:
             self.client.loop_start()
             logger.info(f"MQTT Manager started on {self.broker}:{self.port}")
         except Exception as e:
-            logger.error(f"Could not start MQTT Manager: {str(e)}")
+            logger.error(f"Could not start MQTT Manager: {e}")
 
     def stop(self):
         self.client.loop_stop()

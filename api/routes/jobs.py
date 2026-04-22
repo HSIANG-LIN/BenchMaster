@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from db.models import get_engine, get_session, BenchmarkJob, Machine, Result
@@ -57,7 +57,7 @@ async def create_job(job_data: JobCreate, db: Session = Depends(get_db_session))
         machine_id=job_data.machine_id,
         benchmark=job_data.benchmark,
         status="PENDING",
-        started_at=datetime.utcnow()
+        started_at=datetime.now(timezone.utc)
     )
     
     db.add(new_job)
@@ -105,7 +105,7 @@ async def abort_job(job_id: int, db: Session = Depends(get_db_session)):
         raise HTTPException(status_code=400, detail=f"Cannot abort job in status {job.status}")
     
     job.status = "ABORTED"
-    job.finished_at = datetime.utcnow()
+    job.finished_at = datetime.now(timezone.utc)
     db.commit()
     
     # --- MQTT Trigger ---
